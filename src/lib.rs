@@ -10,7 +10,7 @@
 //! builtins that produce this data from `.bzl` + the `ctx.toolchains` wiring are the integration steps (B2/B3);
 //! this module is the resolver core, provable in isolation (the unit G4 below).
 
-use razel_bzl_api::{BzlValue, ProviderInstance};
+use razel_bzl_api::{encode_provider_instance, ProviderInstance};
 use razel_core::{Digest, Error, Key, KindId, NodeKey, Value, ValuePolicy};
 use razel_engine_api::{ComputeResult, DemandContext, DemandEngine, NodeFunction};
 use std::any::Any;
@@ -127,62 +127,16 @@ impl Value for ResolvedToolchainValue {
         other.as_any().downcast_ref::<ResolvedToolchainValue>().is_some_and(|o| o == self)
     }
     fn content_digest(&self) -> Digest {
-        // Lossless + injective: length-frame the provider id and every field name, and encode EVERY value variant
-        // (not just Str). A delimiter-only Str-only scheme dropped Int/Bool/List fields → two toolchains differing
-        // only in an Int field digested identically (the G4 toolchains differ exactly there). value_eq is the live
-        // cutoff today; this stays correct for the eventual cross-process / action-cache key.
+        // Delegate to the canonical razel-bzl-api provider codec (lossless + injective + length-framed) — the one
+        // source of truth, so this can't drift from the loading/analysis digests. (A former local Str-only scheme
+        // digested two toolchains differing only in an Int field identically; value_eq is the live cutoff today,
+        // this stays correct for the eventual cross-process / action-cache key.)
         let mut b = Vec::new();
-        enc_framed(&mut b, self.info.provider.0.as_bytes());
-        b.extend_from_slice(&(self.info.fields.len() as u64).to_be_bytes());
-        for (n, v) in &self.info.fields {
-            enc_framed(&mut b, n.as_bytes());
-            enc_bzl_digest(&mut b, v);
-        }
+        encode_provider_instance(&self.info, &mut b);
         Digest::of(&b)
     }
     fn as_any(&self) -> &dyn Any {
         self
-    }
-}
-
-/// Length-framed byte run (no field can bleed into the next).
-fn enc_framed(b: &mut Vec<u8>, bytes: &[u8]) {
-    b.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
-    b.extend_from_slice(bytes);
-}
-
-/// Lossless, injective, tagged encoding of a `BzlValue` for digesting. Scalars/lists are encoded in full;
-/// Rule/Provider (never legitimate toolchain-info field values) carry their declared name so distinct ones differ.
-fn enc_bzl_digest(b: &mut Vec<u8>, v: &BzlValue) {
-    match v {
-        BzlValue::None => b.push(0),
-        BzlValue::Bool(x) => {
-            b.push(1);
-            b.push(*x as u8);
-        }
-        BzlValue::Int(i) => {
-            b.push(2);
-            b.extend_from_slice(&i.to_be_bytes());
-        }
-        BzlValue::Str(s) => {
-            b.push(3);
-            enc_framed(b, s.as_bytes());
-        }
-        BzlValue::List(items) => {
-            b.push(4);
-            b.extend_from_slice(&(items.len() as u64).to_be_bytes());
-            for it in items {
-                enc_bzl_digest(b, it);
-            }
-        }
-        BzlValue::Rule(rd) => {
-            b.push(5);
-            enc_framed(b, rd.name.as_bytes());
-        }
-        BzlValue::Provider(pd) => {
-            b.push(6);
-            enc_framed(b, pd.id.as_bytes());
-        }
     }
 }
 
@@ -229,7 +183,7 @@ pub fn register_toolchain_kinds(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use razel_bzl_api::ProviderId;
+    use razel_bzl_api::{BzlValue, ProviderId};
 
     fn cc(tag: &str, os: &str) -> RegisteredToolchain {
         RegisteredToolchain {
