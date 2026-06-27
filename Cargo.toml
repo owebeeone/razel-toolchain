@@ -1,0 +1,18 @@
+[package]
+name = "razel-toolchain"
+version = "0.1.0"
+edition = "2021"
+description = "razelv4 toolchain resolution: constraint-matching resolver + TOOLCHAIN_CONTEXT node (role: logic)."
+
+[dependencies]
+razel-core = { path = "../razel-core", version = "0.1.0" }
+razel-ids = { path = "../razel-ids", version = "0.1.0" }
+razel-engine-api = { path = "../razel-engine-api", version = "0.1.0" }
+razel-os-api = { path = "../razel-os-api", version = "0.1.0" }
+razel-bzl-api = { path = "../razel-bzl-api", version = "0.1.0" }
+
+[features]
+# RED-FIRST: ignore the target constraints when matching → resolution picks the first toolchain of the type
+# regardless of the platform (the v3 "fixture-ish" failure: selection isn't actually data-driven). Turns the
+# "flipping the platform flips the selection" test RED.
+mutant_toolchain_ignores_constraints = []
