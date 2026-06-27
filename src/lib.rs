@@ -10,10 +10,14 @@
 //! builtins that produce this data from `.bzl` + the `ctx.toolchains` wiring are the integration steps (B2/B3);
 //! this module is the resolver core, provable in isolation (the unit G4 below).
 
-use razel_bzl_api::ProviderInstance;
-use razel_core::{Error, KindId};
+use razel_bzl_api::{BzlValue, ProviderInstance};
+use razel_core::{Digest, Error, Key, KindId, NodeKey, Value, ValuePolicy};
+use razel_engine_api::{ComputeResult, DemandContext, DemandEngine, NodeFunction};
+use std::any::Any;
+use std::collections::HashMap;
+use std::sync::Arc;
 
-/// Reserved node-kind id for the configured-target's resolved toolchains (wired in B2/B3).
+/// Node-kind id for a resolved toolchain (the analysis phase requests one per required type).
 pub const TOOLCHAIN_CONTEXT: KindId = KindId(50);
 
 /// An opaque constraint label (e.g. `"@platforms//os:linux"`). SPIKE: a string; the setting/value structure is
@@ -69,10 +73,121 @@ pub fn resolve(
     })
 }
 
+// ──────────────── TOOLCHAIN_CONTEXT node: resolve one (target platform, type) → toolchain_info ────────────────
+
+/// Key: the target platform (the analysis CONFIGURATION dimension — anti-corner I) + the required toolchain
+/// type. Flipping the platform is a distinct key → a distinct resolution (the G4 property over the engine).
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub struct ToolchainContextKey {
+    pub target_platform: String,
+    pub toolchain_type: String,
+}
+impl Key for ToolchainContextKey {
+    fn kind(&self) -> KindId {
+        TOOLCHAIN_CONTEXT
+    }
+    fn encode(&self) -> Vec<u8> {
+        let mut b = Vec::new();
+        for s in [self.target_platform.as_str(), self.toolchain_type.as_str()] {
+            b.extend_from_slice(&(s.len() as u64).to_be_bytes());
+            b.extend_from_slice(s.as_bytes());
+        }
+        b
+    }
+}
+fn decode_ctx_key(bytes: &[u8]) -> Result<ToolchainContextKey, Error> {
+    let err = || Error::Invalid { what: "TOOLCHAIN_CONTEXT key".into(), detail: "malformed".into() };
+    let take = |b: &[u8], i: &mut usize| -> Result<String, Error> {
+        let end = i.checked_add(8).filter(|&e| e <= b.len()).ok_or_else(err)?;
+        let n = u64::from_be_bytes(b[*i..end].try_into().unwrap()) as usize;
+        let s_end = end.checked_add(n).filter(|&e| e <= b.len()).ok_or_else(err)?;
+        let s = String::from_utf8(b[end..s_end].to_vec()).map_err(|_| err())?;
+        *i = s_end;
+        Ok(s)
+    };
+    let mut i = 0;
+    let target_platform = take(bytes, &mut i)?;
+    let toolchain_type = take(bytes, &mut i)?;
+    if i != bytes.len() {
+        return Err(err());
+    }
+    Ok(ToolchainContextKey { target_platform, toolchain_type })
+}
+
+/// Value: the resolved `toolchain_info` provider for this (platform, type). Comparable for early cutoff.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ResolvedToolchainValue {
+    pub info: ProviderInstance,
+}
+impl Value for ResolvedToolchainValue {
+    fn policy(&self) -> ValuePolicy {
+        ValuePolicy { comparable: true, always_dirty: false, shareable: true, serializable: true, process_local: false }
+    }
+    fn value_eq(&self, other: &dyn Value) -> bool {
+        other.as_any().downcast_ref::<ResolvedToolchainValue>().is_some_and(|o| o == self)
+    }
+    fn content_digest(&self) -> Digest {
+        let mut b = Vec::new();
+        b.extend_from_slice(self.info.provider.0.as_bytes());
+        for (n, v) in &self.info.fields {
+            b.extend_from_slice(n.as_bytes());
+            b.push(0);
+            if let BzlValue::Str(s) = v {
+                b.extend_from_slice(s.as_bytes());
+            }
+            b.push(0);
+        }
+        Digest::of(&b)
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// `TOOLCHAIN_CONTEXT`: resolve a (target platform, required type) to its `toolchain_info`, over the registered
+/// toolchains + platforms supplied at the composition root. A LEAF (no node deps): pure data-driven selection.
+/// SPIKE: the registered set + platforms are injected here (config-data); `.bzl` `toolchain()`/`platform()`
+/// declarations that produce this data are a deferred fidelity refinement (additive). The SELECTION is already
+/// data-driven + by-constraint + fail-closed — the anti-#4 property holds regardless of the data's source.
+pub struct ToolchainContextFn {
+    registered: Vec<RegisteredToolchain>,
+    platforms: HashMap<String, Platform>,
+}
+impl ToolchainContextFn {
+    pub fn new(registered: Vec<RegisteredToolchain>, platforms: HashMap<String, Platform>) -> Self {
+        Self { registered, platforms }
+    }
+}
+impl NodeFunction for ToolchainContextFn {
+    fn compute(&self, key: &NodeKey, _ctx: &mut dyn DemandContext) -> ComputeResult {
+        let ctk = match decode_ctx_key(key.canonical()) {
+            Ok(k) => k,
+            Err(e) => return ComputeResult::Error(e),
+        };
+        let platform = match self.platforms.get(&ctk.target_platform) {
+            Some(p) => p,
+            None => return ComputeResult::Error(Error::NotFound { what: "platform".into(), detail: ctk.target_platform }),
+        };
+        match resolve(platform, &ToolchainType(ctk.toolchain_type), &self.registered) {
+            Ok(info) => ComputeResult::Ready(Arc::new(ResolvedToolchainValue { info })),
+            Err(e) => ComputeResult::Error(e),
+        }
+    }
+}
+
+/// Register `TOOLCHAIN_CONTEXT` with the registered toolchains + platforms (the composition root supplies them).
+pub fn register_toolchain_kinds(
+    engine: &mut dyn DemandEngine,
+    registered: Vec<RegisteredToolchain>,
+    platforms: HashMap<String, Platform>,
+) {
+    engine.register(TOOLCHAIN_CONTEXT, Box::new(ToolchainContextFn::new(registered, platforms)));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use razel_bzl_api::{BzlValue, ProviderId};
+    use razel_bzl_api::ProviderId;
 
     fn cc(tag: &str, os: &str) -> RegisteredToolchain {
         RegisteredToolchain {
@@ -121,6 +236,59 @@ mod tests {
         assert!(
             resolve(&platform("linux"), &ToolchainType("//rust:toolchain_type".into()), &registered).is_err(),
             "a required type with no registered toolchain must fail closed"
+        );
+    }
+
+    use razel_engine_api::Demand;
+    struct NoDeps;
+    impl DemandContext for NoDeps {
+        fn request(&mut self, _k: &NodeKey) -> Demand {
+            Demand::Missing
+        }
+        fn request_group(&mut self, ks: &[NodeKey]) -> Vec<Demand> {
+            ks.iter().map(|_| Demand::Missing).collect()
+        }
+    }
+    fn node_resolve(f: &ToolchainContextFn, plat: &str) -> ComputeResult {
+        let k = NodeKey::from_key(&ToolchainContextKey {
+            target_platform: plat.into(),
+            toolchain_type: "//cc:toolchain_type".into(),
+        });
+        f.compute(&k, &mut NoDeps)
+    }
+
+    #[test]
+    fn toolchain_context_node_resolves_by_platform() {
+        // The G4 property OVER THE ENGINE (node level): the target platform is a KEY dimension; flipping it
+        // flips the resolved toolchain — data-driven, no fixture.
+        let mut platforms = HashMap::new();
+        platforms.insert("p_linux".to_string(), platform("linux"));
+        platforms.insert("p_macos".to_string(), platform("macos"));
+        let f = ToolchainContextFn::new(vec![cc("linux-cc", "linux"), cc("macos-cc", "macos")], platforms);
+        let id = |r: ComputeResult| match r {
+            ComputeResult::Ready(v) => v.as_any().downcast_ref::<ResolvedToolchainValue>().unwrap().info.get("id").cloned(),
+            _ => None,
+        };
+        assert_eq!(id(node_resolve(&f, "p_linux")), Some(BzlValue::Str("linux-cc".into())));
+        assert_eq!(
+            id(node_resolve(&f, "p_macos")),
+            Some(BzlValue::Str("macos-cc".into())),
+            "flipping the target platform (the key) flips the resolved toolchain — no fixture"
+        );
+    }
+
+    #[test]
+    fn toolchain_context_node_fail_closed() {
+        let mut platforms = HashMap::new();
+        platforms.insert("p_win".to_string(), platform("windows"));
+        let f = ToolchainContextFn::new(vec![cc("linux-cc", "linux")], platforms);
+        assert!(
+            matches!(node_resolve(&f, "p_win"), ComputeResult::Error(Error::NotFound { .. })),
+            "no compatible toolchain for the platform → fail closed"
+        );
+        assert!(
+            matches!(node_resolve(&f, "unknown"), ComputeResult::Error(Error::NotFound { .. })),
+            "an unknown target platform → fail closed"
         );
     }
 }
