@@ -127,20 +127,62 @@ impl Value for ResolvedToolchainValue {
         other.as_any().downcast_ref::<ResolvedToolchainValue>().is_some_and(|o| o == self)
     }
     fn content_digest(&self) -> Digest {
+        // Lossless + injective: length-frame the provider id and every field name, and encode EVERY value variant
+        // (not just Str). A delimiter-only Str-only scheme dropped Int/Bool/List fields → two toolchains differing
+        // only in an Int field digested identically (the G4 toolchains differ exactly there). value_eq is the live
+        // cutoff today; this stays correct for the eventual cross-process / action-cache key.
         let mut b = Vec::new();
-        b.extend_from_slice(self.info.provider.0.as_bytes());
+        enc_framed(&mut b, self.info.provider.0.as_bytes());
+        b.extend_from_slice(&(self.info.fields.len() as u64).to_be_bytes());
         for (n, v) in &self.info.fields {
-            b.extend_from_slice(n.as_bytes());
-            b.push(0);
-            if let BzlValue::Str(s) = v {
-                b.extend_from_slice(s.as_bytes());
-            }
-            b.push(0);
+            enc_framed(&mut b, n.as_bytes());
+            enc_bzl_digest(&mut b, v);
         }
         Digest::of(&b)
     }
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+/// Length-framed byte run (no field can bleed into the next).
+fn enc_framed(b: &mut Vec<u8>, bytes: &[u8]) {
+    b.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+    b.extend_from_slice(bytes);
+}
+
+/// Lossless, injective, tagged encoding of a `BzlValue` for digesting. Scalars/lists are encoded in full;
+/// Rule/Provider (never legitimate toolchain-info field values) carry their declared name so distinct ones differ.
+fn enc_bzl_digest(b: &mut Vec<u8>, v: &BzlValue) {
+    match v {
+        BzlValue::None => b.push(0),
+        BzlValue::Bool(x) => {
+            b.push(1);
+            b.push(*x as u8);
+        }
+        BzlValue::Int(i) => {
+            b.push(2);
+            b.extend_from_slice(&i.to_be_bytes());
+        }
+        BzlValue::Str(s) => {
+            b.push(3);
+            enc_framed(b, s.as_bytes());
+        }
+        BzlValue::List(items) => {
+            b.push(4);
+            b.extend_from_slice(&(items.len() as u64).to_be_bytes());
+            for it in items {
+                enc_bzl_digest(b, it);
+            }
+        }
+        BzlValue::Rule(rd) => {
+            b.push(5);
+            enc_framed(b, rd.name.as_bytes());
+        }
+        BzlValue::Provider(pd) => {
+            b.push(6);
+            enc_framed(b, pd.id.as_bytes());
+        }
     }
 }
 
@@ -201,6 +243,24 @@ mod tests {
     }
     fn platform(os: &str) -> Platform {
         Platform { constraints: vec![Constraint(format!("os:{os}"))] }
+    }
+
+    #[test]
+    fn content_digest_distinguishes_non_string_fields() {
+        // Regression: the digest was Str-only, so two toolchain infos differing only in an Int field collided.
+        let mk = |n: i64| ResolvedToolchainValue {
+            info: ProviderInstance { provider: ProviderId("CcInfo".into()), fields: vec![("v".to_string(), BzlValue::Int(n))] },
+        };
+        assert_ne!(mk(1).content_digest(), mk(2).content_digest(), "Int-only difference must change the digest");
+        assert_eq!(mk(7).content_digest(), mk(7).content_digest(), "equal values → equal digest (determinism)");
+        // and a field-name vs value framing cannot alias (length-framing).
+        let a = ResolvedToolchainValue {
+            info: ProviderInstance { provider: ProviderId("P".into()), fields: vec![("ab".to_string(), BzlValue::Str("c".into()))] },
+        };
+        let b = ResolvedToolchainValue {
+            info: ProviderInstance { provider: ProviderId("P".into()), fields: vec![("a".to_string(), BzlValue::Str("bc".into()))] },
+        };
+        assert_ne!(a.content_digest(), b.content_digest(), "name/value boundary must be framed, not concatenated");
     }
     fn ty() -> ToolchainType {
         ToolchainType("//cc:toolchain_type".into())
