@@ -7,6 +7,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 razel-core = { path = "../razel-core", version = "0.1.0" }
+razel-ids = { path = "../razel-ids", version = "0.1.0" }
 razel-engine-api = { path = "../razel-engine-api", version = "0.1.0" }
 razel-bzl-api = { path = "../razel-bzl-api", version = "0.1.0" }
 
@@ -15,3 +16,19 @@ razel-bzl-api = { path = "../razel-bzl-api", version = "0.1.0" }
 # regardless of the platform (the v3 "fixture-ish" failure: selection isn't actually data-driven). Turns the
 # "flipping the platform flips the selection" test RED.
 mutant_toolchain_ignores_constraints = []
+# RED-FIRST (the lockdown HEADLINE gate, `toolchain_context_key_registered_toolchain_set_change`): bake the
+# registered toolchain + exec-platform sets into TOOLCHAIN_CONTEXT as a LEAF again (the spike shape — no
+# `ctx.request` dependency edge on the REGISTERED_* nodes). A registration change then invalidates nothing:
+# the warm engine serves a STALE resolved context. Turns the registered-set invalidation tests RED.
+mutant_toolchain_registered_set_not_a_dep = []
+# RED-FIRST (decision E): treat every requested toolchain type as MANDATORY (the optional flag ignored) →
+# a missing optional type errors instead of being absent from the resolved map. Turns the
+# "missing optional is absent" test RED.
+mutant_toolchain_optional_treated_mandatory = []
+# RED-FIRST (the reserved key dims): drop `exec_constraint_labels` / `force_exec_platform` / `debug_target`
+# from the key ENCODE → keys differing only in a reserved dimension collide (the under-keying trap the
+# lockdown's v1 sentinels exist to prevent). Turns the distinct-key-per-dimension tests RED.
+mutant_toolchain_key_drops_reserved_dims = []
+# RED-FIRST (decision F): exec-platform selection picks the FIRST candidate regardless of whether it
+# supplies all mandatory toolchain types (containsAll ignored). Turns the containsAll-selection tests RED.
+mutant_toolchain_exec_selection_first_candidate = []
