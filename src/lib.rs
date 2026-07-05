@@ -262,6 +262,7 @@ mod tests {
         fn request_group(&mut self, ks: &[NodeKey]) -> Vec<Demand> {
             ks.iter().map(|_| Demand::Missing).collect()
         }
+        fn register_dep(&mut self, _k: &NodeKey) {}
     }
     fn node_resolve(f: &ToolchainContextFn, plat: &str) -> ComputeResult {
         let k = NodeKey::from_key(&ToolchainContextKey {
