@@ -724,7 +724,7 @@ mod tests {
             target_compatible_with: vec![Constraint(format!("os:{os}"))],
             exec_compatible_with: vec![],
             info: ProviderInstance {
-                provider: ProviderId("CcToolchainInfo".into()),
+                provider: ProviderId::from_name("CcToolchainInfo"),
                 fields: vec![("id".to_string(), BzlValue::Str(tag.into()))],
             },
         }
@@ -1040,7 +1040,7 @@ mod tests {
             toolchain_type: ToolchainType("//rust:toolchain_type".into()),
             target_compatible_with: vec![Constraint("os:linux".into())],
             exec_compatible_with: vec![Constraint("exec:cap".into())],
-            info: ProviderInstance { provider: ProviderId("RustInfo".into()), fields: vec![] },
+            info: ProviderInstance { provider: ProviderId::from_name("RustInfo"), fields: vec![] },
         };
         let eps = vec![
             RegisteredExecPlatform { name: "ep_plain".into(), constraints: vec![] },
@@ -1099,7 +1099,7 @@ mod tests {
             target_platform: "p".into(),
             type_to_resolved: BTreeMap::from([(
                 ty(),
-                ProviderInstance { provider: ProviderId("CcInfo".into()), fields: vec![("v".to_string(), BzlValue::Int(n))] },
+                ProviderInstance { provider: ProviderId::from_name("CcInfo"), fields: vec![("v".to_string(), BzlValue::Int(n))] },
             )]),
         };
         assert_ne!(mk(1).content_digest(), mk(2).content_digest(), "Int-only difference must change the digest");
