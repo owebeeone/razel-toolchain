@@ -1,0 +1,23 @@
+# razel-toolchain/BUILD.bazel — razel building its OWN toolchain-resolution crate (part of razel-daemon's fat
+# closure). RECENTLY SPLIT into multiple files (context/keys/nodes/types + tests). Direct deps: razel-core,
+# razel-ids, razel-engine-api, razel-bzl-api. `tests.rs` is #[cfg(test)] (staged, not in the rlib).
+load("//rules/rust:rust.bzl", "rust_library")
+
+rust_library(
+    name = "razel_toolchain",
+    srcs = [
+        "src/lib.rs",  # crate root (listed first)
+        "src/context.rs",
+        "src/keys.rs",
+        "src/nodes.rs",
+        "src/tests.rs",
+        "src/types.rs",
+    ],
+    deps = [
+        "//razel-core:razel_core",
+        "//razel-ids:razel_ids",
+        "//razel-engine-api:razel_engine_api",
+        "//razel-bzl-api:razel_bzl_api",
+    ],
+    visibility = ["//visibility:public"],  # consumed cross-package (analysis, host)
+)
